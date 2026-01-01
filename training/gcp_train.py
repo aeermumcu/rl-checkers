@@ -21,19 +21,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 DIFFICULTY_CHECKPOINTS = {
     'easy': 500,       # 500 games
     'medium': 2000,    # 2,000 games
-    'hard': 10000,     # 10,000 games
-    'impossible': 50000  # 50,000 games (final)
+    'hard': 5000,      # 5,000 games
+    'impossible': 10000 # 10,000 games (strong AI ~12-24h with GPU parallelization)
 }
 
-# Training configuration
+# Training configuration - GPU OPTIMIZED with parallel self-play
 CONFIG = {
-    'games_per_iteration': 50,     # Games per training cycle
+    'games_per_iteration': 64,     # Games per training cycle
     'batches_per_iteration': 200,  # Training batches
-    'mcts_simulations': 100,       # MCTS sims per move
+    'mcts_simulations': 100,       # Full MCTS sims per move (no compromise!)
     'batch_size': 256,
     'learning_rate': 0.001,
-    'total_games': 50000,          # Target total games
+    'total_games': 10000,          # Target total games (~12-24h with parallel)
     'checkpoint_every': 500,       # Save checkpoint every N games
+    'num_parallel_games': 32,      # Games to run in parallel on GPU
 }
 
 
@@ -106,6 +107,7 @@ def main():
     
     from trainer import Trainer
     from model import CheckersNetwork
+    from parallel_mcts import ParallelSelfPlay
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -114,9 +116,18 @@ def main():
     # Status file for monitoring
     status_file = os.path.join('checkpoints', 'gcp_training_status.json')
     
-    # Initialize trainer
-    print("\nInitializing trainer...")
+    # Initialize network and parallel self-play
+    print("\nInitializing network and parallel self-play...")
+    network = CheckersNetwork()
+    parallel_play = ParallelSelfPlay(
+        network=network,
+        num_parallel=CONFIG.get('num_parallel_games', 32),
+        mcts_sims=CONFIG['mcts_simulations']
+    )
+    
+    # Initialize trainer (for replay buffer and training)
     trainer = Trainer(
+        network=network,
         buffer_size=200000,
         batch_size=CONFIG['batch_size'],
         mcts_simulations=CONFIG['mcts_simulations'],
@@ -180,11 +191,17 @@ def main():
         print(f"   Elapsed: {format_time(elapsed)} | ETA: {format_time(eta_seconds)}")
         print(f"{'='*70}")
         
-        # Generate self-play games
-        print(f"\n⏳ Generating {games_per_iter} self-play games...")
-        examples = trainer.generate_games(games_per_iter)
+        # Generate self-play games in PARALLEL (GPU optimized!)
+        print(f"\n⏳ Generating {games_per_iter} self-play games (parallel={CONFIG.get('num_parallel_games', 32)})...")
+        game_examples = parallel_play.generate_games(games_per_iter)
         total_games += games_per_iter
-        print(f"   Generated {examples} training examples")
+        
+        # Add examples to trainer's buffer
+        from trainer import TrainingExample
+        for state, policy, value in game_examples:
+            trainer.buffer.add([TrainingExample(state, policy, value)])
+        
+        print(f"   Generated {len(game_examples)} training examples")
         
         # Train
         if len(trainer.buffer) >= trainer.batch_size:
