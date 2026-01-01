@@ -106,9 +106,9 @@ def main():
     else:
         print("⚠️ No GPU found, using CPU (will be slower)")
     
-    from trainer import Trainer, TrainingExample, ReplayBuffer
+    from trainer import TrainingExample, ReplayBuffer
     from model import CheckersNetwork
-    from fast_mcts import FastTrainer
+    from true_parallel import TrueParallelMCTS, generate_training_data
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -117,18 +117,21 @@ def main():
     # Status file for monitoring
     status_file = os.path.join('checkpoints', 'gcp_training_status.json')
     
-    # Initialize network and fast trainer
-    print("\nInitializing network and GPU-optimized fast trainer...")
+    # Initialize network and TRUE parallel MCTS
+    print("\n🚀 Initializing network and TRUE GPU-parallel MCTS...")
+    print(f"   Running {CONFIG.get('num_parallel_games', 32)} games simultaneously")
+    print(f"   Full {CONFIG['mcts_simulations']} MCTS simulations per move")
     network = CheckersNetwork()
-    fast_trainer = FastTrainer(
-        network=network,
-        mcts_sims=CONFIG['mcts_simulations'],
-        mcts_batch=8  # Batch 8 leaf evaluations per GPU call
-    )
+    
+    # Warm up GPU with compiled function
+    print("   Warming up GPU...")
+    dummy = np.random.randn(32, 8, 8, 4).astype(np.float32)
+    _ = network.predict_batch(dummy)
+    print("   GPU ready!")
     
     # Initialize replay buffer for training
     buffer = ReplayBuffer(200000)
-    total_games = 0
+    total_games_count = 0
     
     # Resume if requested
     start_games = 0
@@ -187,21 +190,28 @@ def main():
         print(f"   Elapsed: {format_time(elapsed)} | ETA: {format_time(eta_seconds)}")
         print(f"{'='*70}")
         
-        # Generate self-play games with GPU-optimized MCTS
-        print(f"\n⏳ Generating {games_per_iter} self-play games (fast MCTS with batched GPU)...")
+        # Generate self-play games with TRUE GPU-parallel MCTS
+        num_parallel = CONFIG.get('num_parallel_games', 32)
+        print(f"\n⏳ Generating {games_per_iter} games ({num_parallel} parallel, {CONFIG['mcts_simulations']} MCTS sims)...")
         
-        def progress_cb(done, total, examples):
-            print(f"   Game {done}/{total} - {examples} examples", end='\r', flush=True)
+        import time as time_mod
+        gen_start = time_mod.time()
         
-        game_examples = fast_trainer.generate_examples(games_per_iter, progress_callback=progress_cb)
+        game_examples = generate_training_data(
+            network=network,
+            num_games=games_per_iter,
+            mcts_sims=CONFIG['mcts_simulations'],
+            num_parallel=num_parallel
+        )
+        
         total_games += games_per_iter
-        print()  # Clear progress line
+        gen_elapsed = time_mod.time() - gen_start
         
         # Add examples to buffer
         for state, policy, value in game_examples:
             buffer.add([TrainingExample(state, policy, value)])
         
-        print(f"   Generated {len(game_examples)} training examples (buffer: {len(buffer):,})")
+        print(f"   ✅ {len(game_examples)} examples in {gen_elapsed:.1f}s ({games_per_iter/gen_elapsed:.2f} games/sec)")
         
         # Train on batch
         metrics = {'loss': 0, 'policy_loss': 0, 'value_loss': 0}
