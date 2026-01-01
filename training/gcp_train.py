@@ -20,22 +20,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Difficulty checkpoints - when to save each difficulty model
 DIFFICULTY_CHECKPOINTS = {
-    'easy': 500,       # 500 games
-    'medium': 2000,    # 2,000 games
-    'hard': 5000,      # 5,000 games
-    'impossible': 10000 # 10,000 games (strong AI ~12-24h with GPU parallelization)
+    'easy': 500,        # 500 games - beginner AI
+    'medium': 2500,     # 2,500 games - casual player level
+    'hard': 10000,      # 10,000 games - strong club player
+    'impossible': 25000 # 25,000 games - very strong AI (~70h training)
 }
 
-# Training configuration - GPU OPTIMIZED with parallel self-play
+# Training configuration - MAXIMUM QUALITY
 CONFIG = {
     'games_per_iteration': 64,     # Games per training cycle
     'batches_per_iteration': 200,  # Training batches
-    'mcts_simulations': 100,       # Full MCTS sims per move (no compromise!)
+    'mcts_simulations': 100,       # Full MCTS simulations (no compromise!)
     'batch_size': 256,
     'learning_rate': 0.001,
-    'total_games': 10000,          # Target total games (~12-24h with parallel)
+    'total_games': 25000,          # Target: 25k games (~70h, ~$50)
     'checkpoint_every': 500,       # Save checkpoint every N games
-    'num_parallel_games': 32,      # Games to run in parallel on GPU
+    'num_parallel_games': 32,      # Games to run in parallel
 }
 
 
