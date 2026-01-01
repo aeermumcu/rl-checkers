@@ -1,0 +1,31 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Training artifacts (large files)
+training/checkpoints/
+training/*.h5
+*.weights.h5
+
+# Model files (large, can regenerate)
+model/model.keras
+model/saved_model/
+
+# Keep the tfjs model for the web app
+# !model/tfjs/
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Logs
+*.log

@@ -1,0 +1,5 @@
+tensorflow>=2.10.0
+numpy>=1.21.0
+tensorflowjs>=4.0.0
+pytest>=7.0.0
+tqdm>=4.64.0
