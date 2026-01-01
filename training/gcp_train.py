@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+import numpy as np
 from datetime import datetime, timedelta
 
 # Ensure imports work
@@ -38,21 +39,21 @@ CONFIG = {
 }
 
 
-def save_difficulty_model(trainer, difficulty, output_dir):
+def save_difficulty_model_fast(network, difficulty, output_dir):
     """Save a model for a specific difficulty level."""
     diff_dir = os.path.join(output_dir, difficulty)
     os.makedirs(diff_dir, exist_ok=True)
     
     # Save checkpoint
     checkpoint_path = os.path.join(diff_dir, 'model.weights.h5')
-    trainer.network.save(checkpoint_path)
+    network.save(checkpoint_path)
     
     # Export to TensorFlow.js
     try:
         import tensorflowjs as tfjs
         tfjs_dir = os.path.join(diff_dir, 'tfjs')
         os.makedirs(tfjs_dir, exist_ok=True)
-        tfjs.converters.save_keras_model(trainer.network.model, tfjs_dir)
+        tfjs.converters.save_keras_model(network.model, tfjs_dir)
         print(f"  ✅ Exported {difficulty} model to TF.js")
     except Exception as e:
         print(f"  ⚠️ Could not export to TF.js: {e}")
@@ -105,9 +106,9 @@ def main():
     else:
         print("⚠️ No GPU found, using CPU (will be slower)")
     
-    from trainer import Trainer
+    from trainer import Trainer, TrainingExample, ReplayBuffer
     from model import CheckersNetwork
-    from parallel_mcts import ParallelSelfPlay
+    from fast_mcts import FastTrainer
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -116,23 +117,18 @@ def main():
     # Status file for monitoring
     status_file = os.path.join('checkpoints', 'gcp_training_status.json')
     
-    # Initialize network and parallel self-play
-    print("\nInitializing network and parallel self-play...")
+    # Initialize network and fast trainer
+    print("\nInitializing network and GPU-optimized fast trainer...")
     network = CheckersNetwork()
-    parallel_play = ParallelSelfPlay(
+    fast_trainer = FastTrainer(
         network=network,
-        num_parallel=CONFIG.get('num_parallel_games', 32),
-        mcts_sims=CONFIG['mcts_simulations']
+        mcts_sims=CONFIG['mcts_simulations'],
+        mcts_batch=8  # Batch 8 leaf evaluations per GPU call
     )
     
-    # Initialize trainer (for replay buffer and training)
-    trainer = Trainer(
-        network=network,
-        buffer_size=200000,
-        batch_size=CONFIG['batch_size'],
-        mcts_simulations=CONFIG['mcts_simulations'],
-        checkpoint_dir='checkpoints'
-    )
+    # Initialize replay buffer for training
+    buffer = ReplayBuffer(200000)
+    total_games = 0
     
     # Resume if requested
     start_games = 0
@@ -191,33 +187,56 @@ def main():
         print(f"   Elapsed: {format_time(elapsed)} | ETA: {format_time(eta_seconds)}")
         print(f"{'='*70}")
         
-        # Generate self-play games in PARALLEL (GPU optimized!)
-        print(f"\n⏳ Generating {games_per_iter} self-play games (parallel={CONFIG.get('num_parallel_games', 32)})...")
-        game_examples = parallel_play.generate_games(games_per_iter)
+        # Generate self-play games with GPU-optimized MCTS
+        print(f"\n⏳ Generating {games_per_iter} self-play games (fast MCTS with batched GPU)...")
+        
+        def progress_cb(done, total, examples):
+            print(f"   Game {done}/{total} - {examples} examples", end='\r', flush=True)
+        
+        game_examples = fast_trainer.generate_examples(games_per_iter, progress_callback=progress_cb)
         total_games += games_per_iter
+        print()  # Clear progress line
         
-        # Add examples to trainer's buffer
-        from trainer import TrainingExample
+        # Add examples to buffer
         for state, policy, value in game_examples:
-            trainer.buffer.add([TrainingExample(state, policy, value)])
+            buffer.add([TrainingExample(state, policy, value)])
         
-        print(f"   Generated {len(game_examples)} training examples")
+        print(f"   Generated {len(game_examples)} training examples (buffer: {len(buffer):,})")
         
-        # Train
-        if len(trainer.buffer) >= trainer.batch_size:
+        # Train on batch
+        metrics = {'loss': 0, 'policy_loss': 0, 'value_loss': 0}
+        if len(buffer) >= CONFIG['batch_size']:
             print(f"\n🧠 Training for {CONFIG['batches_per_iteration']} batches...")
-            metrics = trainer.train(CONFIG['batches_per_iteration'], CONFIG['learning_rate'])
+            
+            # Manual training loop since we're not using Trainer class
+            losses = []
+            for _ in range(CONFIG['batches_per_iteration']):
+                states, policies, values = buffer.sample(CONFIG['batch_size'])
+                loss = network.model.train_on_batch(
+                    states, 
+                    {'policy_output': policies, 'value_output': values}
+                )
+                losses.append(loss)
+            
+            avg_losses = np.mean(losses, axis=0)
+            metrics = {
+                'loss': float(avg_losses[0]),
+                'policy_loss': float(avg_losses[1]),
+                'value_loss': float(avg_losses[2])
+            }
             print(f"   Loss: {metrics['loss']:.4f}")
             print(f"   Policy: {metrics['policy_loss']:.4f} | Value: {metrics['value_loss']:.4f}")
         
         # Save regular checkpoint
-        trainer.save_checkpoint('latest')
+        checkpoint_path = os.path.join('checkpoints', 'latest.weights.h5')
+        network.save(checkpoint_path)
+        print(f"   Saved checkpoint: {checkpoint_path}")
         
         # Check for difficulty thresholds
         for diff, threshold in DIFFICULTY_CHECKPOINTS.items():
             if total_games >= threshold and diff not in saved_difficulties:
                 print(f"\n🎉 MILESTONE: Saving {diff.upper()} model ({threshold:,} games)")
-                save_difficulty_model(trainer, diff, args.output_dir)
+                save_difficulty_model_fast(network, diff, args.output_dir)
                 saved_difficulties.add(diff)
         
         # Iteration time
