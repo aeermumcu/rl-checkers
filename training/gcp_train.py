@@ -131,13 +131,15 @@ def main():
     
     # Initialize replay buffer for training
     buffer = ReplayBuffer(200000)
-    total_games_count = 0
     
     # Resume if requested
     start_games = 0
     if args.resume:
         try:
-            trainer.load_checkpoint('latest')
+            checkpoint_path = os.path.join('checkpoints', 'latest.weights.h5')
+            if os.path.exists(checkpoint_path):
+                network.load(checkpoint_path)
+                print(f"   Loaded weights from {checkpoint_path}")
             # Try to get game count from status
             if os.path.exists(status_file):
                 with open(status_file) as f:
