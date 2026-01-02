@@ -420,7 +420,11 @@ def run_mp_training(config, resume_path=None):
                 
                 if batch_states:
                     pol, val = network.predict_batch(np.array(batch_states, dtype=np.float32))
-                    p_np, v_np = pol.numpy(), val.numpy()
+                    
+                    # Safely convert to numpy (handle both Tensor and ndarray)
+                    p_np = pol.numpy() if hasattr(pol, 'numpy') else pol
+                    v_np = val.numpy() if hasattr(val, 'numpy') else val
+                    
                     for k, wid in enumerate(batch_indices):
                         result_queues[wid].put((p_np[k:k+1], v_np[k:k+1]))
                 
