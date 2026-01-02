@@ -21,7 +21,7 @@ from checkers_game import CheckersGame, Move, Piece
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s [%(processName)s] %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -333,7 +333,8 @@ def run_mp_training(config, resume_path=None):
     """
     mp.set_start_method('spawn', force=True)
     
-    num_workers = 3 # Leave 1 cpu for main/inference
+    num_workers = config.get('num_parallel_games', 32)
+    logger.info(f"Starting {num_workers} worker processes...")
     
     # Queues
     pred_queue = mp.Queue()
@@ -419,9 +420,6 @@ def run_mp_training(config, resume_path=None):
                         break
                 
                 if batch_states:
-                    if total_games == 0 and time.time() - start_tick < 1.0:
-                         logger.debug(f"Process batch {len(batch_states)}")
-                    
                     pol, val = network.predict_batch(np.array(batch_states, dtype=np.float32))
                     
                     # Safely convert to numpy (handle both Tensor and ndarray)
@@ -430,8 +428,6 @@ def run_mp_training(config, resume_path=None):
                     
                     for k, wid in enumerate(batch_indices):
                         result_queues[wid].put((p_np[k:k+1], v_np[k:k+1]))
-                elif total_games == 0 and (time.time() - start_time) % 10 < 0.01:
-                    logger.debug("Queue empty...")
                 
                 # CHECK FOR NEW DATA
                 while not data_queue.empty():
