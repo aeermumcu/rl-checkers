@@ -268,7 +268,7 @@ def main():
                 'loss': float(metrics.get('loss', 0)),
                 'policy_loss': float(metrics.get('policy_loss', 0)),
                 'value_loss': float(metrics.get('value_loss', 0)),
-                'buffer_size': len(trainer.buffer)
+                'buffer_size': len(buffer)
             }
         }
         update_status(status_file, status)
