@@ -312,12 +312,18 @@ class TrueParallelMCTS:
         else:
             temp = 0.1
         
-        if temp > 0 and policy.sum() > 0:
-            policy = policy ** (1.0 / temp)
+        # Safe temperature-scaled policy (avoid overflow with log-space computation)
+        if policy.sum() > 0:
+            # Use log-space to avoid overflow: exp(log(x)/temp) = x^(1/temp)
+            log_policy = np.log(policy + 1e-10)  # Add small epsilon to avoid log(0)
+            scaled_log = log_policy / temp
+            # Subtract max for numerical stability (softmax trick)
+            scaled_log -= scaled_log.max()
+            policy = np.exp(scaled_log)
             policy = policy / policy.sum()
             move_idx = np.random.choice(len(legal_moves), p=policy)
         else:
-            move_idx = np.argmax(policy)
+            move_idx = np.argmax(policy) if policy.max() > 0 else 0
         
         # Store training example
         state = g.game.get_board_tensor()
