@@ -13,9 +13,8 @@ try:
 except RuntimeError:
     pass
 
-# Import game logic (safe for workers)
-from checkers_game import CheckersGame
-from mcts import MCTS
+# Import game logic
+from checkers_game import CheckersGame, Move, Piece
 
 # Configure logging
 logging.basicConfig(
@@ -25,154 +24,211 @@ logging.basicConfig(
 )
 logger = logging.getLogger('MP_TRAIN')
 
+@dataclass
+class MPNode:
+    """MCTS Node for Multiprocessing."""
+    state: CheckersGame
+    parent: Optional['MPNode'] = None
+    move: Optional[Move] = None
+    children: Dict[int, 'MPNode'] = field(default_factory=dict)
+    visit_count: int = 0
+    value_sum: float = 0.0
+    prior: float = 0.0
+
+    @property
+    def q_value(self) -> float:
+        return self.value_sum / self.visit_count if self.visit_count > 0 else 0.0
+        
+    @property
+    def ucb_score(self) -> float:
+        if not self.parent: return 0.0
+        c_puct = 2.0
+        exploration = c_puct * self.prior * math.sqrt(self.parent.visit_count) / (1 + self.visit_count)
+        return self.q_value + exploration
+
+
+class QueueMCTS:
+    """MCTS that requests predictions via Queue."""
+    def __init__(self, game: CheckersGame, worker_id: int, pred_queue: mp.Queue, result_queue: mp.Queue):
+        self.root = MPNode(state=game.copy())
+        self.worker_id = worker_id
+        self.pred_queue = pred_queue
+        self.result_queue = result_queue
+        
+    def run_simulation(self):
+        node = self.root
+        path = [node]
+        
+        # Selection
+        while node.children and not node.state.is_game_over():
+            # Select best child
+            best_score = -float('inf')
+            best_child = None
+            for child in node.children.values():
+                score = child.ucb_score
+                if score > best_score:
+                    best_score = score
+                    best_child = child
+            
+            if best_child:
+                node = best_child
+                path.append(node)
+            else:
+                break
+        
+        # Expansion & Evaluation
+        value = 0.0
+        if not node.state.is_game_over():
+            # Request Prediction
+            self.pred_queue.put((self.worker_id, [node.state.get_board_tensor()]))
+            policy, v = self.result_queue.get()
+            value = float(v[0])
+            policy = policy[0]
+            
+            # Expand
+            legal_moves = node.state.get_legal_moves()
+            for move in legal_moves:
+                move_idx = node.state.move_to_index(move)
+                new_state = node.state.copy()
+                new_state.make_move(move)
+                
+                child = MPNode(
+                    state=new_state,
+                    parent=node,
+                    move=move,
+                    prior=policy[move_idx]
+                )
+                node.children[move_idx] = child
+                
+            # Add noise if root (simplified: do it only at specific step if needed, or always for exploration)
+            if node == self.root:
+                 noise = np.random.dirichlet([0.3] * len(node.children))
+                 for i, child in enumerate(node.children.values()):
+                     child.prior = 0.75 * child.prior + 0.25 * noise[i]
+        else:
+            # Terminal
+            winner = node.state.get_winner()
+            if winner == 0:
+                value = 0.0
+            else:
+                # Value for parent (player who moved to get here)
+                parent_player = 1 if node.state.current_player == 2 else 2
+                value = 1.0 if winner == parent_player else -1.0
+        
+        # Backprop
+        for n in reversed(path):
+            n.visit_count += 1
+            n.value_sum += value
+            value = -value
+
+    def get_policy(self, temp=1.0):
+        legal_moves = self.root.state.get_legal_moves()
+        policy = np.zeros(1024, dtype=np.float32)
+        
+        probs = []
+        for move in legal_moves:
+            idx = self.root.state.move_to_index(move)
+            if idx in self.root.children:
+                probs.append(self.root.children[idx].visit_count)
+            else:
+                probs.append(0)
+        
+        probs = np.array(probs)
+        if probs.sum() == 0:
+             return policy # Should not happen usually
+             
+        if temp == 0:
+            best_idx = np.argmax(probs)
+            probs = np.zeros_like(probs)
+            probs[best_idx] = 1.0
+        else:
+            # Log space temp scaling
+             log_probs = np.log(probs + 1e-10) / temp
+             log_probs -= log_probs.max()
+             probs = np.exp(log_probs)
+             probs /= probs.sum()
+             
+        for i, move in enumerate(legal_moves):
+            idx = self.root.state.move_to_index(move)
+            policy[idx] = probs[i]
+            
+        return policy
+
 def worker_process(worker_id, pred_queue, result_queue, data_queue, config):
     """
     Worker process running independent MCTS games.
-    Only communicates via queues. Does NOT import TensorFlow.
     """
     try:
-        # Seed logic per worker to ensure diversity
         np.random.seed(int(time.time()) + worker_id * 1000)
-        
         logger.info(f"Worker {worker_id} started")
         
         mcts_sims = config['mcts_simulations']
-        games_per_batch = 10  # Reduced internal batch since we have multiple workers
         
         while True:
-            # Check if we should stop (sentinel)
+            # Check stop
             try:
                 msg = result_queue.get_nowait()
-                if msg == 'STOP':
-                    break
+                if msg == 'STOP': break
             except queue.Empty:
                 pass
             
-            # --- Game Generation Loop ---
             game = CheckersGame()
-            mcts = MCTS(game, None) # Value network is mocked, we intercept predict calls
+            mcts = QueueMCTS(game, worker_id, pred_queue, result_queue)
             
             history = []
             move_count = 0
             
             while not game.is_game_over() and move_count < 200:
-                # Custom MCTS loop to handle remote prediction
-                root = mcts.root
-                
-                # Expand root if needed
-                if not root.expanded:
-                    # Request prediction for root
-                    pred_queue.put((worker_id, [game.get_board_tensor()]))
-                    policy, value = result_queue.get()
-                    mcts.expand_node(root, game, policy[0])
-                    mcts.add_dirichlet_noise(root)
-                
-                # Simulations
+                # Run MCTS simulations
+                # First expansion (root)
+                if not mcts.root.children:
+                     mcts.run_simulation() # Will expand root
+                     
                 for _ in range(mcts_sims):
-                    node = root
-                    path = [node]
-                    search_game = game.copy()
-                    
-                    # Selection
-                    while node.expanded and node.children:
-                        action, node = mcts.select_child(node)
-                        search_game.make_move(action)
-                        path.append(node)
-                    
-                    # Evaluation / Expansion
-                    value = 0
-                    if not search_game.is_game_over():
-                        if not node.expanded:
-                            # Request prediction
-                            pred_queue.put((worker_id, [search_game.get_board_tensor()]))
-                            policy, v = result_queue.get()
-                            mcts.expand_node(node, search_game, policy[0])
-                            value = float(v[0])
-                    else:
-                        # Terminal state
-                        winner = search_game.get_winner()
-                        if winner == 0:
-                            value = 0
-                        else:
-                            # Value is for the player who just moved (parent of this node)
-                            current_player = search_game.current_player
-                            # Use parent player (opponent of current)
-                            parent_player = 1 if current_player == 2 else 2
-                            value = 1.0 if winner == parent_player else -1.0
-                            
-                    # Backpropagation
-                    mcts.backpropagate(path, value)
+                    mcts.run_simulation()
                 
                 # Select move
-                pi = mcts.get_action_probs(root)
-                
-                # Temperature
                 temp = 1.0 if move_count < 30 else 0.1
-                if temp == 0:
-                    action_idx = np.argmax(pi)
-                else:
-                    # Improved temperature scaling with log-space safety
-                    if np.sum(pi) > 0:
-                        log_pi = np.log(pi + 1e-10) / temp
-                        log_pi -= log_pi.max()
-                        pi_temp = np.exp(log_pi)
-                        pi_temp /= pi_temp.sum()
-                        action_idx = np.random.choice(len(pi_temp), p=pi_temp)
-                    else:
-                        action_idx = np.argmax(pi)
+                full_policy = mcts.get_policy(temp)
                 
-                action = list(root.children.keys())[action_idx]
-                
-                # Store example
-                # MCTS stores actions as move objects, keys are moves
-                # We need to map back to 1024 policy vector
-                full_policy = np.zeros(1024)
+                # Sample move from policy
                 legal_moves = game.get_legal_moves()
+                if not legal_moves: break
                 
-                # Map partial policy to full policy vector
-                visit_counts = []
+                # Extract probs for legal moves only for sampling
+                move_probs = []
                 for move in legal_moves:
-                    if move in root.children:
-                         visit_counts.append(root.children[move].visits)
-                    else:
-                         visit_counts.append(0)
-                        
-                visits = np.array(visit_counts)
-                if visits.sum() > 0:
-                    probs = visits / visits.sum()
-                    if temp > 0:
-                        # Apply temp to probabilities
-                         log_probs = np.log(probs + 1e-10) / temp
-                         log_probs -= log_probs.max()
-                         probs = np.exp(log_probs)
-                         probs /= probs.sum()
-                    else:
-                        # Hard max
-                        idx = np.argmax(probs)
-                        probs = np.zeros_like(probs)
-                        probs[idx] = 1.0
-                else:
-                    probs = np.ones(len(legal_moves)) / len(legal_moves)
-                
-                for i, move in enumerate(legal_moves):
                     idx = game.move_to_index(move)
-                    full_policy[idx] = probs[i]
+                    move_probs.append(full_policy[idx])
                 
-                history.append([game.get_board_tensor(), full_policy, game.current_player])
+                move_probs = np.array(move_probs)
+                move_probs /= move_probs.sum()
                 
-                # Apply move
+                if config.get('argmax_move', False):
+                    move_idx = np.argmax(move_probs)
+                else:
+                    move_idx = np.random.choice(len(legal_moves), p=move_probs)
+                    
+                action = legal_moves[move_idx]
+                
+                # Save history
+                history.append((game.get_board_tensor(), full_policy, game.current_player))
+                
+                # Make move
                 game.make_move(action)
-                mcts = MCTS(game, None) # Reset tree for next move (or reuse subtree)
                 move_count += 1
-            
-            # Game finished
-            winner = game.get_winner()
-            result_val = 0
-            if winner is not None:
-                result_val = lambda p: 1.0 if winner == p else -1.0 
-            else:
-                result_val = lambda p: 0.0 # Draw
                 
+                # Reuse tree
+                action_idx = game.move_to_index(action)
+                if action_idx in mcts.root.children:
+                    mcts.root = mcts.root.children[action_idx]
+                    mcts.root.parent = None
+                else:
+                    mcts = QueueMCTS(game, worker_id, pred_queue, result_queue)
+
+            # Game over
+            winner = game.get_winner()
+            
             examples = []
             for state, pi, player in history:
                 v = 0.0
@@ -180,11 +236,11 @@ def worker_process(worker_id, pred_queue, result_queue, data_queue, config):
                    v = 1.0 if winner == player else -1.0
                 examples.append((state, pi, v))
             
-            # Send examples to trainer
             data_queue.put(examples)
             
-            # Small throttle to prevent flooding
-            # time.sleep(0.01)
+    except Exception as e:
+        logger.error(f"Worker {worker_id} crashed: {e}")
+        traceback.print_exc()
             
     except Exception as e:
         logger.error(f"Worker {worker_id} crashed: {e}")
