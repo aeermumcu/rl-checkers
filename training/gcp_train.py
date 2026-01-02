@@ -23,19 +23,19 @@ DIFFICULTY_CHECKPOINTS = {
     'easy': 500,        # 500 games - beginner AI
     'medium': 2500,     # 2,500 games - casual player level
     'hard': 10000,      # 10,000 games - strong club player
-    'impossible': 25000 # 25,000 games - very strong AI (~70h training)
+    'impossible': 50000 # 50,000 games - superhuman AI
 }
 
 # Training configuration - MAXIMUM QUALITY
 CONFIG = {
-    'games_per_iteration': 64,     # Games per training cycle
-    'batches_per_iteration': 200,  # Training batches
+    'games_per_iteration': 128,    # Games per training cycle (increased for throughput)
+    'batches_per_iteration': 400,  # Training batches
     'mcts_simulations': 100,       # Full MCTS simulations (no compromise!)
     'batch_size': 256,
     'learning_rate': 0.001,
-    'total_games': 25000,          # Target: 25k games (~70h, ~$50)
-    'checkpoint_every': 500,       # Save checkpoint every N games
-    'num_parallel_games': 32,      # Games to run in parallel
+    'total_games': 50000,          # Target: 50k games (Superhuman)
+    'checkpoint_every': 1000,      # Save checkpoint every N games
+    'num_parallel_games': 96,      # 16 vCPUs * 6 workers/core = 96 workers
 }
 
 
