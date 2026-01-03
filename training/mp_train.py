@@ -49,6 +49,12 @@ class MPNode:
         exploration = c_puct * self.prior * math.sqrt(self.parent.visit_count) / (1 + self.visit_count)
         return self.q_value + exploration
 
+@dataclass
+class TrainingExample:
+    state: np.ndarray
+    policy: np.ndarray
+    value: float
+
 
 class QueueMCTS:
     """MCTS that requests predictions via Queue."""
@@ -237,7 +243,7 @@ def worker_process(worker_id, pred_queue, result_queue, data_queue, config):
                 v = 0.0
                 if winner:
                    v = 1.0 if winner == player else -1.0
-                examples.append((state, pi, v))
+                examples.append(TrainingExample(state, pi, v))
             
             data_queue.put(examples)
             
