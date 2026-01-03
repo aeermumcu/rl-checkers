@@ -502,10 +502,7 @@ def run_mp_training(config, resume_path=None):
                 # Train on a few batches
                 losses = []
                 for _ in range(10): # Train 10 steps per cycle
-                    batch = buffer.sample(config['batch_size'])
-                    states = np.array([b.state for b in batch])
-                    policies = np.array([b.policy for b in batch])
-                    values = np.array([b.value for b in batch])
+                    states, policies, values = buffer.sample(config['batch_size'])
                     
                     metrics = network.model.train_on_batch(
                         states, [policies, values], return_dict=True
