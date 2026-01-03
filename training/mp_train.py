@@ -452,8 +452,7 @@ def run_mp_training(config, resume_path=None):
             
             # 2. Add to buffer
             if new_examples:
-                examples_obj = [TrainingExample(s, p, v) for s,p,v in new_examples]
-                buffer.add(examples_obj)
+                buffer.add(new_examples)
                 
                 prev_total = total_games
                 total_games += len(new_examples)
